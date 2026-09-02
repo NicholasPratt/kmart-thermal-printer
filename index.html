@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Thermal Print — JLR-79430</title>
+  <style>
+    :root { color-scheme: light dark; --bd: #8884; --accent: #e0533d; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; max-width: 820px; margin-inline: auto; line-height: 1.4; }
+    h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+    .sub { opacity: .6; font-size: .85rem; margin-bottom: 1rem; }
+    .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+    button { font: inherit; padding: .5rem .9rem; border: 1px solid var(--bd); border-radius: 8px; background: #8881; cursor: pointer; }
+    button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #c33; display: inline-block; }
+    .dot.on { background: #3c7; }
+    .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--bd); margin-bottom: 1rem; }
+    .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; }
+    .tabs button.active { border-bottom-color: var(--accent); font-weight: 600; }
+    .pane { display: none; }
+    .pane.active { display: block; }
+    textarea { width: 100%; min-height: 120px; font: inherit; padding: .5rem; border-radius: 8px; border: 1px solid var(--bd); background: #8881; }
+    label { display: block; font-size: .8rem; margin: .6rem 0 .15rem; opacity: .8; }
+    input[type=range] { width: 100%; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem 1rem; }
+    .preview { border: 1px dashed var(--bd); padding: .5rem; text-align: center; margin: 1rem 0; overflow-x: auto; }
+    .preview canvas { image-rendering: pixelated; background: #fff; max-width: 100%; }
+    pre#log { background: #0b0b0b; color: #b9f5c9; padding: .75rem; border-radius: 8px; font-size: .78rem; max-height: 200px; overflow: auto; white-space: pre-wrap; }
+    .note { font-size: .8rem; opacity: .7; }
+  </style>
+</head>
+<body>
+  <h1>🖨️ Thermal Print <span class="sub">Kmart JLR-79430 (YHK)</span></h1>
+  <div class="sub">Web Bluetooth · Chrome/Edge only · must be served over <code>localhost</code> or https.</div>
+
+  <div class="bar">
+    <button id="connect" class="primary">Connect printer</button>
+    <button id="inspect">Inspect BLE</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <span><span id="dot" class="dot"></span> <span id="status">not connected</span></span>
+  </div>
+
+  <div class="tabs">
+    <button data-tab="text" class="active">Text</button>
+    <button data-tab="image">Image</button>
+    <button data-tab="qr">QR code</button>
+    <button data-tab="photobooth">Photobooth</button>
+  </div>
+
+  <div class="pane active" id="pane-text">
+    <textarea id="text" placeholder="Type something to print…">Hello from JLR-79430 🐾
+No phone. No WalkPrint. Just Bluetooth.</textarea>
+    <div class="grid">
+      <div><label>Font size <span id="fsVal">28</span>px</label><input type="range" id="fontSize" min="14" max="64" value="28"></div>
+      <div><label>Align</label>
+        <select id="align" style="width:100%;padding:.4rem;border-radius:8px;">
+          <option value="left">Left</option><option value="center">Center</option><option value="right">Right</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="pane" id="pane-image">
+    <input type="file" id="file" accept="image/*">
+    <div class="grid">
+      <div><label>Brightness <span id="brVal">0</span></label><input type="range" id="brightness" min="-0.5" max="0.5" step="0.02" value="0"></div>
+      <div><label>Contrast <span id="coVal">1.0</span></label><input type="range" id="contrast" min="0.5" max="2" step="0.05" value="1"></div>
+      <div><label>Mode</label>
+        <select id="mode" style="width:100%;padding:.4rem;border-radius:8px;">
+          <option value="dither">Dither (photos)</option><option value="threshold">Threshold (line art)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="pane" id="pane-qr">
+    <textarea id="qrtext" placeholder="URL, text, Wi-Fi, anything…">https://example.com</textarea>
+    <div class="grid">
+      <div><label>Error correction</label>
+        <select id="qrEcc" style="width:100%;padding:.4rem;border-radius:8px;">
+          <option value="L">Low (7%) — densest</option>
+          <option value="M" selected>Medium (15%)</option>
+          <option value="Q">Quartile (25%)</option>
+          <option value="H">High (30%) — most robust</option>
+        </select>
+      </div>
+      <div><label>Caption</label><label style="margin-top:.2rem;"><input type="checkbox" id="qrCaption"> print text below code</label></div>
+    </div>
+  </div>
+
+  <div class="pane" id="pane-photobooth">
+    <div style="text-align:center;">
+      <video id="cam" playsinline muted style="max-width:100%;border-radius:8px;background:#000;display:none;"></video>
+    </div>
+    <div class="bar" style="margin-top:.5rem;">
+      <button id="camStart">Start camera</button>
+      <button id="camShot" disabled>📸 Capture</button>
+      <button id="camRetake" disabled>Retake</button>
+    </div>
+    <div class="grid">
+      <div><label><input type="checkbox" id="camMirror" checked> Mirror (selfie)</label></div>
+      <div><label>Contrast <span id="pbCoVal">1.30</span></label><input type="range" id="pbContrast" min="0.5" max="2" step="0.05" value="1.3"></div>
+    </div>
+  </div>
+
+  <div class="preview"><canvas id="preview" width="384" height="80"></canvas></div>
+
+  <div class="grid">
+    <div><label>Darkness <span id="enVal">50</span>%</label><input type="range" id="energy" min="0" max="100" value="50"></div>
+    <div><label>Feed after print <span id="feedVal">100</span> dots</label><input type="range" id="feed" min="0" max="500" value="100"></div>
+  </div>
+
+  <div class="bar" style="margin-top:1rem;">
+    <button id="print" class="primary" disabled>Print</button>
+    <span class="note">Preview shows the exact dots that will print.</span>
+  </div>
+
+  <pre id="log">ready.</pre>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
