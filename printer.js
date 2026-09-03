@@ -16,7 +16,14 @@ const PRINT_WIDTH = 384;      // dots per line
 const BYTES_PER_LINE = 48;    // 384 / 8
 
 // ESC/POS opcodes
-const ESC = 0x1b, GS = 0x1d;
+const ESC = 0x1b, GS = 0x1d, DLE = 0x10, EOT = 0x04;
+
+// Real-time status bits, as this unit actually answers them (see README).
+// DLE EOT 1 — printer: bit3 = offline
+// DLE EOT 2 — offline: bit2 = cover open, bit5 = stopped on paper end, bit6 = error
+// DLE EOT 4 — paper:   bits 2,3 = roll near end, bits 5,6 = roll end
+const ST_OFFLINE = 0x08, ST_COVER = 0x04, ST_PAPER_END = 0x20, ST_ERROR = 0x40;
+const ST_ROLL_LOW = 0x0c, ST_ROLL_END = 0x60;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -26,6 +33,9 @@ export class CatPrinter {
     this.device = null;
     this.tx = null;   // write characteristic
     this.rx = null;   // notify characteristic
+    this._pending = null;        // in-flight status query awaiting its reply
+    this._drainUntil = 0;        // discard late replies until this timestamp
+    this.statusSupported = null; // null until we've asked once
   }
 
   get connected() {
@@ -65,14 +75,18 @@ export class CatPrinter {
     if (rx) {
       try {
         await rx.startNotifications();
-        rx.addEventListener('characteristicvaluechanged', (e) => {
-          const v = e.target.value;
-          const hex = [...new Uint8Array(v.buffer)].map((b) => b.toString(16).padStart(2, '0')).join(' ');
-          this.log(`« ${hex}`);
-        });
+        rx.addEventListener('characteristicvaluechanged',
+          (e) => this._onNotify(new Uint8Array(e.target.value.buffer)));
       } catch { /* notifications optional */ }
     }
     this.log(`✅ Connected. write=${tx.uuid.slice(4, 8)} notify=${rx ? rx.uuid.slice(4, 8) : 'none'}`);
+
+    // Ask once, up front, so we know whether paper-out is detectable at all.
+    await sleep(300);
+    const st = await this.status({ timeout: 800 });
+    this.log(st.supported
+      ? `Status: ${st.summary}`
+      : 'ℹ️ This printer does not answer status queries — paper-out can\'t be detected.');
     return this.device.name;
   }
 
@@ -80,17 +94,116 @@ export class CatPrinter {
     if (this.connected) this.device.gatt.disconnect();
   }
 
+  // Route an inbound packet to whoever asked for it, else log it.
+  _onNotify(packet) {
+    const hex = [...packet].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+    // A reply to a query that already timed out must never be handed to the next
+    // one — a stale "all clear" would mask a real paper-out.
+    if (performance.now() < this._drainUntil) { this.log(`« ${hex} (late — discarded)`); return; }
+    if (this._pending) {
+      const p = this._pending;
+      this._pending = null;
+      clearTimeout(p.timer);
+      p.resolve(packet);
+      return;
+    }
+    this.log(`« ${hex}`);
+  }
+
+  // One unpaced write. Everything else goes through _write.
+  async _writeRaw(buf) {
+    if (this.tx.properties.writeWithoutResponse) await this.tx.writeValueWithoutResponse(buf);
+    else await this.tx.writeValue(buf);
+  }
+
   // Stream a raw byte job in BLE-friendly chunks with pacing so the UART bridge
-  // (and the printer's line buffer) don't overflow.
-  async _write(bytes, { chunk = 180, delay = 40 } = {}) {
-    const withoutResp = this.tx.properties.writeWithoutResponse;
+  // (and the printer's line buffer) don't overflow. `watch` is polled between
+  // chunks and aborts the job if it reports a fault.
+  async _write(bytes, { chunk = 180, delay = 40, watch = null, watchEvery = 3000 } = {}) {
+    let nextWatch = performance.now() + watchEvery;
     for (let i = 0; i < bytes.length; i += chunk) {
-      const slice = bytes.subarray(i, i + chunk);
-      if (withoutResp) await this.tx.writeValueWithoutResponse(slice);
-      else await this.tx.writeValue(slice);
+      await this._writeRaw(bytes.subarray(i, i + chunk));
       if (delay) await sleep(delay);
       if (i % (chunk * 20) === 0) this.log(`  …${Math.min(i + chunk, bytes.length)}/${bytes.length} bytes`);
+      if (watch && performance.now() >= nextWatch) {
+        nextWatch = performance.now() + watchEvery;
+        const fault = await watch();
+        if (fault) throw new Error(fault);
+      }
     }
+  }
+
+  // --- real-time status ------------------------------------------------------
+  // DLE EOT is answered out of band — this unit replies even mid-raster — so a
+  // job can be watched while it streams. Replies took up to ~500 ms in testing.
+
+  // Ask one question. Resolves to the reply byte, or null if nothing comes back.
+  async _query(bytes, timeout = 600, drain = 400) {
+    if (!this.rx || !this.connected) return null;
+    const late = this._drainUntil - performance.now();      // let a previous
+    if (late > 0) await sleep(late);                        // late reply land first
+    const reply = new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this._pending = null;
+        this._drainUntil = performance.now() + drain;
+        resolve(null);
+      }, timeout);
+      this._pending = { resolve, timer };
+    });
+    await this._writeRaw(Uint8Array.from(bytes));
+    const packet = await reply;
+    return packet && packet.length ? packet[0] : null;
+  }
+
+  /**
+   * Read printer, offline and paper status.
+   * Every field is `null` when the firmware didn't answer that query — callers
+   * must read null as "unknown", never as "fine" and never as "faulty".
+   * @returns {Promise<object>} { supported, online, coverOpen, paperOut, paperLow, error, summary, raw }
+   */
+  async status({ timeout = 600 } = {}) {
+    const printer = await this._query([DLE, EOT, 0x01], timeout);
+    const offline = await this._query([DLE, EOT, 0x02], timeout);
+    const paper = await this._query([DLE, EOT, 0x04], timeout);
+    const supported = [printer, offline, paper].some((b) => b !== null);
+    this.statusSupported = supported;
+
+    const bit = (byte, mask) => (byte === null ? null : (byte & mask) !== 0);
+    const merge = (...vals) => {
+      const known = vals.filter((v) => v !== null);
+      return known.length ? known.some(Boolean) : null;
+    };
+    const st = {
+      supported,
+      raw: { printer, offline, paper },
+      online: printer === null ? null : !(printer & ST_OFFLINE),
+      coverOpen: bit(offline, ST_COVER),
+      paperOut: merge(bit(offline, ST_PAPER_END), bit(paper, ST_ROLL_END)),
+      paperLow: bit(paper, ST_ROLL_LOW),
+      error: bit(offline, ST_ERROR),
+    };
+
+    const parts = [];
+    if (st.online === false) parts.push('offline');
+    else if (st.online) parts.push('online');
+    if (st.paperOut) parts.push('OUT OF PAPER');
+    else if (st.paperLow) parts.push('paper low');
+    else if (st.paperOut === false) parts.push('paper OK');
+    if (st.coverOpen) parts.push('cover open');
+    if (st.error) parts.push('error bit set');
+    st.summary = parts.length ? parts.join(' · ') : 'no usable status';
+    return st;
+  }
+
+  // One cheap question mid-job. Silence means "unknown", so we keep printing
+  // rather than abandoning a good job because a reply was slow.
+  async _faultCheck() {
+    const b = await this._query([DLE, EOT, 0x02], 400);
+    if (b === null) return null;
+    if (b & ST_PAPER_END) return 'Out of paper — printing stopped partway.';
+    if (b & ST_COVER) return 'Cover opened — printing stopped partway.';
+    if (b & ST_ERROR) return 'Printer reported a fault — printing stopped partway.';
+    return null;
   }
 
   /**
@@ -100,6 +213,24 @@ export class CatPrinter {
    */
   async print(lines, opts = {}) {
     if (!this.connected) throw new Error('Not connected.');
+
+    // Pre-flight: don't stream a job into a printer that can't take it.
+    if (opts.preflight !== false && this.statusSupported !== false) {
+      const st = await this.status();
+      if (!st.supported) {
+        this.log('ℹ️ No status support — printing blind.');
+      } else {
+        this.log(`Status: ${st.summary}`);
+        if (st.paperOut) throw new Error('Out of paper — load a roll and print again.');
+        if (st.coverOpen) throw new Error('Cover is open — close it and print again.');
+        if (st.online === false) throw new Error('Printer reports it is offline.');
+        if (st.error) throw new Error('Printer reports a fault — power-cycle it and try again.');
+        if (st.paperLow) this.log('⚠️ Roll is near its end.');
+      }
+    } else if (this.statusSupported === false) {
+      this.log('ℹ️ No status support — printing blind.');   // asked once, at connect
+    }
+
     const heat = Math.round(40 + (opts.energy ?? 0.6) * 180);   // ESC 7 heating time, ~40..220
     const feed = Math.max(0, opts.feed ?? 200);                 // dots of blank paper to clear the tear bar
     const H = lines.length;
@@ -131,7 +262,16 @@ export class CatPrinter {
         rows & 0xff, (rows >> 8) & 0xff);
       for (let i = 0; i < rows * BYTES_PER_LINE; i++) job.push(0x00);
     }
-    await this._write(Uint8Array.from(job));
+    // Long jobs get watched as they stream, so a mid-print paper-out is caught
+    // in a few seconds instead of after the whole zine has been pushed out.
+    const watch = this.statusSupported && H > 400 ? () => this._faultCheck() : null;
+    if (watch) this.log('Watching for paper-out while printing…');
+    try {
+      await this._write(Uint8Array.from(job), { watch });
+    } catch (e) {
+      try { await this._writeRaw(Uint8Array.from([ESC, 0x40])); } catch { /* already gone */ }
+      throw e;
+    }
     this.log('✅ Sent.');
   }
 

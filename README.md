@@ -88,13 +88,45 @@ The driver streams a raw ESC/POS job over that link:
 Writes go out in **~180-byte chunks with ~40 ms pauses** (≈5 KB/s). The UART bridge
 drains slower than BLE can push, and flooding it silently corrupts the stream.
 
+### Status queries
+
+This firmware answers **real-time status**, out of band — it replies even in the
+middle of a raster block, so a job can be watched while it streams. Probed on a
+`YHK-6172`, replies within ~250–500 ms:
+
+| Query | Reply | Meaning |
+|---|---|---|
+| `DLE EOT 1` printer status | `0x16` | online (bit3 clear) |
+| `DLE EOT 2` offline status | `0x12` | cover closed, no paper end, no error |
+| `DLE EOT 3` error status | `0x12` | no error — bit6, the auto-recoverable/overheat bit, stays clear |
+| `DLE EOT 4` paper sensor | `0x10` | paper present (bit1 should be fixed high; this clone leaves it clear) |
+| `GS r 1` paper sensor | `0x00` | paper adequate |
+| `GS r 2`, `ESC v`, `GS I n` | — | not implemented |
+
+So the app can tell you it's **out of paper, cover open or offline** — see
+`printer.js` `status()`. What it can **not** tell you is temperature: there's no
+command that reads back degrees, and the one bit that would carry overheat stayed
+clear even with the head hot after burning 2 cm of solid black at heat 220. Head
+temperature is managed inside the firmware, invisibly; you observe it as printing
+slowing or output fading on long dense jobs, never as a message.
+
+Printing is guarded accordingly:
+
+- **Pre-flight** — `print()` reads status first and refuses to stream into a
+  printer that is out of paper, open or faulted.
+- **Mid-job watch** — jobs over 400 lines are polled every 3 s with a single
+  `DLE EOT 2`, so a paper-out is caught in seconds instead of after the whole
+  zine has been pushed out.
+- **Silence means unknown.** A printer that doesn't answer is probed once at
+  connect and then printed to blind — an unanswered query never blocks a job.
+
 ## Files
 
 | File | Role |
 |---|---|
 | `index.html` | UI |
 | `app.js` | UI glue, live preview, webcam capture, zine photos + saving |
-| `printer.js` | Web Bluetooth driver + ESC/POS protocol |
+| `printer.js` | Web Bluetooth driver + ESC/POS protocol + status queries |
 | `render.js` | text/zine/image/QR → 384px canvas → dither/threshold → 48-byte lines |
 | `qrcodegen.js` | vendored QR encoder ([Project Nayuki](https://www.nayuki.io/page/qr-code-generator-library), MIT) |
 
@@ -106,6 +138,9 @@ drains slower than BLE can push, and flooding it silently corrupts the stream.
 - **Muddy photos** → darkness ~50% with contrast up; faces dither better under-burned.
 - **Last line stuck behind the tear bar** → raise **Feed after print**.
 - **Zine won't save** → local storage is ~5 MB; drop a photo or **Export file** instead.
+- **"Out of paper" but there is paper** → the roll-end sensor is optical; a very
+  dark or reflective liner can read as empty. Print with `preflight: false` to skip
+  the check.
 - **Connects but nothing prints** → hit **Inspect BLE**, or use `chrome://bluetooth-internals`
   for a full raw GATT dump, and check the UUIDs against the table above.
 - **Print stalls partway** → the bridge is being flooded; raise the `delay` in
