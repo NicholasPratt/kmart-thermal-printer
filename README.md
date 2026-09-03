@@ -110,6 +110,33 @@ clear even with the head hot after burning 2 cm of solid black at heat 220. Head
 temperature is managed inside the firmware, invisibly; you observe it as printing
 slowing or output fading on long dense jobs, never as a message.
 
+### `err:` — an undocumented report channel
+
+The printer also pushes **unsolicited** packets shaped `err:<byte>` — ASCII
+`65 72 72 3a` then one flag byte. Observed on a `YHK-6172` part-way through a
+five-page zine:
+
+```
+« 65 72 72 3a 80     err:0x80 raised
+« 65 72 72 3a 00     err:0x00 cleared, ~15 s later
+```
+
+What the bits mean is undocumented, and two samples aren't enough to say. The
+plausible readings are head overheat or a full buffer — but both mean the same
+thing operationally: **it has stopped taking data**. Streaming through one is how
+a five-page zine comes out two pages long, with every byte "sent" and most of it
+dropped on the floor. So the driver holds the stream while a non-zero code is
+outstanding, resumes when it clears, and gives up loudly after 60 s rather than
+losing the rest of the job silently. Codes raised during a job are listed when it
+finishes.
+
+These packets are also why status replies are only ever accepted as **one byte**:
+handed to a waiting query, `err:…` decodes from its first byte `0x65` — which, read
+as a paper-sensor byte, means *out of paper*.
+
+If a long job still stops short, raise **Send pacing**: the printer is being fed
+faster than it prints, and the pacing slider is the flow-control knob.
+
 ### Knowing when a job is done
 
 `GS r 1` is a **buffered** query — unlike `DLE EOT`, which is answered in real

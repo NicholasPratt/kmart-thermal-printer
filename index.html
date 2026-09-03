@@ -191,6 +191,9 @@ line to place a photo.</textarea>
   <div class="grid">
     <div><label>Darkness <span id="enVal">50</span>%</label><input type="range" id="energy" min="0" max="100" value="50"></div>
     <div><label>Feed after print <span id="feedVal">100</span> dots</label><input type="range" id="feed" min="0" max="500" value="100"></div>
+    <div><label>Send pacing <span id="paceVal">40</span> ms/chunk</label><input type="range" id="pace" min="20" max="120" step="5" value="40">
+      <div class="note">Raise this if a long job stops part-way — the printer is being fed faster than it prints.</div>
+    </div>
   </div>
 
   <div class="bar" style="margin-top:1rem;">

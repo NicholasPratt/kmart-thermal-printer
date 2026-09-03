@@ -25,6 +25,12 @@ const ESC = 0x1b, GS = 0x1d, DLE = 0x10, EOT = 0x04;
 const ST_OFFLINE = 0x08, ST_COVER = 0x04, ST_PAPER_END = 0x20, ST_ERROR = 0x40;
 const ST_ROLL_LOW = 0x0c, ST_ROLL_END = 0x60;
 
+// This firmware also pushes unsolicited reports shaped `err:<byte>` (ASCII
+// "err:" then one flag byte). Observed: 0x80 raised part-way through a long
+// dense job, 0x00 a few seconds later. Meaning undocumented — most likely head
+// overheat or a full buffer — but either way it means "not taking data now".
+const ERR_PREFIX = [0x65, 0x72, 0x72, 0x3a];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class CatPrinter {
@@ -38,6 +44,9 @@ export class CatPrinter {
     this._lastPacketAt = 0;      // when the last packet came back
     this._needsSettle = false;   // a query timed out; wait for quiet before asking again
     this._observedLatency = 0;   // slowest reply we've actually seen, ms
+    this._errState = 0;          // last err:<byte> the printer pushed, 0 = clear
+    this._jobErrors = [];        // err codes raised during the current job
+    this._lastStatusSummary = ''; // to keep the log from repeating itself
     this.statusSupported = null; // null until we've asked once
     this.busy = false;           // a job is in flight
   }
@@ -89,6 +98,7 @@ export class CatPrinter {
     // The bridge needs a moment after connecting before replies start flowing.
     await sleep(800);
     const st = await this.status({ timeout: 1200 });
+    this._lastStatusSummary = st.supported ? st.summary : '';
     this.log(st.supported
       ? `Status: ${st.summary}${this._observedLatency > 800 ? ` (replies take ~${Math.round(this._observedLatency)} ms)` : ''}`
       : 'ℹ️ No status reply yet — paper-out can\'t be detected. Will re-check if one turns up.');
@@ -110,6 +120,11 @@ export class CatPrinter {
     const since = this._lastQueryAt ? now - this._lastQueryAt : 0;
     if (since && since < 15000) this._observedLatency = Math.max(this._observedLatency, since);
 
+    // Status replies are exactly one byte. Anything longer is an asynchronous
+    // report, and handing one to a waiting query would decode 0x65 ('e', the
+    // first byte of "err:") as a status byte — which reads as out of paper.
+    if (packet.length !== 1) { this._onAsync(packet, hex); return; }
+
     if (this._pending) {
       const p = this._pending;
       this._pending = null;
@@ -126,6 +141,38 @@ export class CatPrinter {
       this.statusSupported = null;
       this.log('ℹ️ It does answer, just slowly — will re-check before the next print.');
     }
+  }
+
+  // Unsolicited reports from the printer, `err:<byte>` among them.
+  _onAsync(packet, hex) {
+    const isErr = packet.length >= 5 && ERR_PREFIX.every((b, i) => packet[i] === b);
+    if (!isErr) { this.log(`« ${hex}`); return; }
+    const code = packet[4];
+    const prev = this._errState;
+    this._errState = code;
+    if (code) {
+      if (!this._jobErrors.includes(code)) this._jobErrors.push(code);
+      this.log(`⚠️ Printer raised err:0x${code.toString(16).padStart(2, '0')} — it has stopped taking data.`);
+    } else if (prev) {
+      this.log('ℹ️ Printer cleared its error (err:00).');
+    }
+  }
+
+  // Hold the stream while the printer says it isn't taking data. Streaming
+  // through one of these is how a five-page zine ends up two pages long: the
+  // bytes go out, the printer isn't listening, and the rest of the job is lost.
+  async _waitForClear({ limit = 60000 } = {}) {
+    if (!this._errState) return;
+    const code = this._errState;
+    const t0 = performance.now();
+    this.log(`⏸ Paused mid-job on err:0x${code.toString(16).padStart(2, '0')} — waiting for it to clear…`);
+    while (this._errState) {
+      if (performance.now() - t0 > limit) {
+        throw new Error(`Printer stuck on err:0x${this._errState.toString(16).padStart(2, '0')} for ${Math.round(limit / 1000)} s — job stopped so the rest isn't lost silently.`);
+      }
+      await sleep(200);
+    }
+    this.log(`▶️ Cleared after ${Math.round(performance.now() - t0)} ms — resuming.`);
   }
 
   // After a timeout, wait for the line to go quiet before asking anything else.
@@ -154,6 +201,7 @@ export class CatPrinter {
   async _write(bytes, { chunk = 180, delay = 40, watch = null, watchEvery = 3000 } = {}) {
     let nextWatch = performance.now() + watchEvery;
     for (let i = 0; i < bytes.length; i += chunk) {
+      if (this._errState) await this._waitForClear();
       await this._writeRaw(bytes.subarray(i, i + chunk));
       if (delay) await sleep(delay);
       if (i % (chunk * 20) === 0) this.log(`  …${Math.min(i + chunk, bytes.length)}/${bytes.length} bytes`);
@@ -171,9 +219,11 @@ export class CatPrinter {
 
   // Ask one question. Resolves to the reply byte, or null if nothing comes back.
   // The window grows to fit the slowest reply we've seen.
-  async _query(bytes, timeout = 600, { adaptive = true } = {}) {
+  async _query(bytes, timeout = 600, { adaptive = true, waitForQuiet = true } = {}) {
     if (!this.rx || !this.connected) return null;
-    if (this._needsSettle) { this._needsSettle = false; await this._settle(); }
+    // Settling costs seconds, so a mid-print check skips the wait — but still
+    // sets the flag, so the next query off the critical path settles first.
+    if (this._needsSettle && waitForQuiet) { this._needsSettle = false; await this._settle(); }
     const window = adaptive
       ? Math.min(6000, Math.max(timeout, this._observedLatency * 1.5 + 300))
       : timeout;
@@ -274,7 +324,7 @@ export class CatPrinter {
   // One cheap question mid-job. Silence means "unknown", so we keep printing
   // rather than abandoning a good job because a reply was slow.
   async _faultCheck() {
-    const b = await this._query([DLE, EOT, 0x02], 400, { adaptive: false });
+    const b = await this._query([DLE, EOT, 0x02], 1500, { adaptive: false, waitForQuiet: false });
     if (b === null) return null;
     if (b & ST_PAPER_END) return 'Out of paper — printing stopped partway.';
     if (b & ST_COVER) return 'Cover opened — printing stopped partway.';
@@ -301,6 +351,8 @@ export class CatPrinter {
   }
 
   async _print(lines, opts = {}) {
+    this._jobErrors = [];
+    this._errState = 0;
 
     // Pre-flight: don't stream a job into a printer that can't take it.
     if (opts.preflight !== false && this.statusSupported !== false) {
@@ -308,7 +360,8 @@ export class CatPrinter {
       if (!st.supported) {
         this.log('ℹ️ No status support — printing blind.');
       } else {
-        this.log(`Status: ${st.summary}`);
+        if (st.summary !== this._lastStatusSummary) this.log(`Status: ${st.summary}`);
+        this._lastStatusSummary = st.summary;
         if (st.paperOut) throw new Error('Out of paper — load a roll and print again.');
         if (st.coverOpen) throw new Error('Cover is open — close it and print again.');
         if (st.online === false) throw new Error('Printer reports it is offline.');
@@ -360,13 +413,17 @@ export class CatPrinter {
     if (watch) this.log('Watching for paper-out while printing…');
     else if (this.statusSupported && H > 400) this.log('Not watching mid-print — this printer replies too slowly.');
     try {
-      await this._write(Uint8Array.from(job), { watch });
+      await this._write(Uint8Array.from(job), { watch, delay: opts.delay ?? 40 });
     } catch (e) {
       try { await this._writeRaw(Uint8Array.from([ESC, 0x40])); } catch { /* already gone */ }
       throw e;
     }
     this.log('Sent — waiting for the printer to finish…');
-    return this._awaitCompletion(H + feed);
+    const done = await this._awaitCompletion(H + feed);
+    if (this._jobErrors.length) {
+      this.log(`⚠️ Printer raised ${this._jobErrors.map((c) => `err:0x${c.toString(16).padStart(2, '0')}`).join(', ')} during this job — if output is short, that's why.`);
+    }
+    return { ...done, errors: this._jobErrors.slice() };
   }
 
   // Phase 0 helper: dump all GATT services + characteristics.

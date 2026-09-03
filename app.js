@@ -436,6 +436,7 @@ function updatePreview() {
   $('coVal').textContent = (+$('contrast').value).toFixed(2);
   $('enVal').textContent = $('energy').value;
   $('feedVal').textContent = $('feed').value;
+  $('paceVal').textContent = $('pace').value;
 
   let canvas;
   if (activeTab === 'text') {
@@ -489,7 +490,7 @@ function updatePreview() {
 
 // Re-render preview on any control change.
 ['text', 'fontSize', 'align', 'brightness', 'contrast', 'mode', 'energy', 'feed',
-  'qrtext', 'qrEcc', 'qrCaption', 'pbContrast', 'camCrop',
+  'qrtext', 'qrEcc', 'qrCaption', 'pbContrast', 'camCrop', 'pace',
   'pageSize', 'pageMM', 'pageNums', 'pageLine', 'zineText', 'zineFont', 'zineAlign']
   .forEach((id) => { const el = $(id); el.addEventListener('input', updatePreview); el.addEventListener('change', updatePreview); });
 
@@ -506,6 +507,7 @@ $('print').onclick = async () => {
     await printer.print(lastLines, {
       energy: +$('energy').value / 100,
       feed: +$('feed').value,
+      delay: +$('pace').value,
     });
   } catch (e) { log(`❌ ${e.message}`); }
   finally {
