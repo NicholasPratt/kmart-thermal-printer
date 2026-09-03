@@ -36,6 +36,7 @@ export class CatPrinter {
     this._pending = null;        // in-flight status query awaiting its reply
     this._drainUntil = 0;        // discard late replies until this timestamp
     this.statusSupported = null; // null until we've asked once
+    this.busy = false;           // a job is in flight
   }
 
   get connected() {
@@ -195,6 +196,31 @@ export class CatPrinter {
     return st;
   }
 
+  /**
+   * Block until the printer has actually finished, not merely received the job.
+   *
+   * `GS r 1` is a *buffered* query: unlike DLE EOT (which is answered in real
+   * time, even mid-raster) it is answered only when the parser reaches it, so
+   * sending it after a job turns it into an end-of-job sentinel — the reply
+   * means everything queued ahead of it has been consumed. If this firmware
+   * answers early, or not at all, the settle window still keeps a caller from
+   * re-entering while the platen is moving.
+   */
+  async _awaitCompletion(rows, { settle = 800 } = {}) {
+    if (!this.rx) { await sleep(settle); return { confirmed: false, ms: settle }; }
+    const t0 = performance.now();
+    const reply = await this._query([GS, 0x72, 0x01], Math.min(20000, 3000 + rows * 3));
+    const ms = Math.round(performance.now() - t0);
+    if (reply === null) {
+      this.log(`⚠️ No end-of-job reply after ${ms} ms — assuming finished.`);
+      await sleep(settle);
+      return { confirmed: false, ms };
+    }
+    if (ms < settle) await sleep(settle - ms);        // let the platen stop
+    this.log(`✅ Printer finished, ${ms} ms after the last byte.`);
+    return { confirmed: true, ms };
+  }
+
   // One cheap question mid-job. Silence means "unknown", so we keep printing
   // rather than abandoning a good job because a reply was slow.
   async _faultCheck() {
@@ -213,6 +239,18 @@ export class CatPrinter {
    */
   async print(lines, opts = {}) {
     if (!this.connected) throw new Error('Not connected.');
+    // One job at a time: a second stream would interleave with this one's bytes
+    // and print garbage, so refuse rather than queue.
+    if (this.busy) throw new Error('Still printing — wait for the job to finish.');
+    this.busy = true;
+    try {
+      return await this._print(lines, opts);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async _print(lines, opts = {}) {
 
     // Pre-flight: don't stream a job into a printer that can't take it.
     if (opts.preflight !== false && this.statusSupported !== false) {
@@ -272,7 +310,8 @@ export class CatPrinter {
       try { await this._writeRaw(Uint8Array.from([ESC, 0x40])); } catch { /* already gone */ }
       throw e;
     }
-    this.log('✅ Sent.');
+    this.log('Sent — waiting for the printer to finish…');
+    return this._awaitCompletion(H + feed);
   }
 
   // Phase 0 helper: dump all GATT services + characteristics.

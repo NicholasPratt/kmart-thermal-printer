@@ -110,6 +110,22 @@ clear even with the head hot after burning 2 cm of solid black at heat 220. Head
 temperature is managed inside the firmware, invisibly; you observe it as printing
 slowing or output fading on long dense jobs, never as a message.
 
+### Knowing when a job is done
+
+`GS r 1` is a **buffered** query — unlike `DLE EOT`, which is answered in real
+time even mid-raster, it is answered only when the parser reaches it. Sent after
+a job, it becomes an end-of-job sentinel: the reply means everything queued ahead
+of it has been consumed. So `print()` resolves when the printer has *finished*,
+not when the last byte went out, and the Print button stays disabled until then —
+you can't stack a second job on top of one still running. `print()` also refuses
+re-entry outright while a job is in flight, since two interleaved streams would
+print garbage.
+
+The log line `Printer finished, N ms after the last byte` is worth watching: if
+N grows with job length the sentinel really is queueing behind the raster; if it
+stays flat at ~250 ms on a long job, this firmware answers it early and the fixed
+settle window is doing the work instead. Either way the button is held.
+
 Printing is guarded accordingly:
 
 - **Pre-flight** — `print()` reads status first and refuses to stream into a
@@ -119,6 +135,8 @@ Printing is guarded accordingly:
   zine has been pushed out.
 - **Silence means unknown.** A printer that doesn't answer is probed once at
   connect and then printed to blind — an unanswered query never blocks a job.
+- **One job at a time** — completion is confirmed by the sentinel above, with an
+  800 ms settle so the platen has stopped before the button comes back.
 
 ## Files
 

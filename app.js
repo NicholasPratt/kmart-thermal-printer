@@ -496,14 +496,23 @@ function updatePreview() {
 // --- print ------------------------------------------------------------------
 $('print').onclick = async () => {
   if (!lastLines || !lastLines.length) { log('Nothing to print.'); return; }
+  if (printer.busy) return;
+  // Stays disabled until the printer says it has finished — not merely until
+  // the bytes are sent — so a second job can't be queued on top of this one.
   $('print').disabled = true;
+  $('print').textContent = 'Printing…';
+  $('disconnect').disabled = true;
   try {
     await printer.print(lastLines, {
       energy: +$('energy').value / 100,
       feed: +$('feed').value,
     });
   } catch (e) { log(`❌ ${e.message}`); }
-  finally { $('print').disabled = !printer.connected; }
+  finally {
+    $('print').textContent = 'Print';
+    $('print').disabled = !printer.connected;
+    $('disconnect').disabled = !printer.connected;
+  }
 };
 
 setConnected(false);
