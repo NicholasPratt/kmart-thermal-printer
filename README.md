@@ -7,7 +7,8 @@ over Bluetooth — no phone, no WalkPrint app, no drivers.
 **▶️ Use it now: https://nicholaspratt.github.io/kmart-thermal-printer/**
 
 Print **text**, **dithered images**, **QR codes**, or take a **webcam photobooth**
-shot — with a live preview of the exact dots that will print.
+shot — with a live preview of the exact dots that will print. There's also a
+**zine maker**: fixed-size pages, page numbers, cut lines and placed photos.
 
 ## Browser support
 
@@ -29,6 +30,29 @@ Web Bluetooth is Chromium-only. The app itself is OS-agnostic; the browser is th
    You do **not** need to pair it in your OS Bluetooth settings — in fact, if the OS
    has already claimed it, "Forget" it there first.
 4. Pick a tab, tune the preview, hit **Print**.
+
+### Making a zine
+
+The **Zine** tab is a text editor that paginates. Write, pick a page size, and
+the preview shows every page end to end exactly as it will print.
+
+- **Page size** — the head is 203 dpi (8 dots/mm) and the paper is 48 mm wide, so
+  a 48 × 48 mm page is 384 × 384 dots. Presets, a custom height in mm, or
+  *Continuous* for one unbroken strip.
+- **Page numbers** — centred at the foot of every page.
+- **Cut line between pages** — a dashed line in a 2 mm gutter *between* pages, so
+  each page stays exactly the height you asked for. Cut on the line.
+- **Photos** — import (they're downscaled to 384 dots on the way in), then set a
+  width and alignment per photo and hit **Insert** to drop an `[img:1]` token at
+  the cursor. A line reading `[img:1]` on its own places that photo; a line of
+  `---` forces a page break. Photos are dithered at their final size, so they stay
+  photographic while the text around them stays crisp.
+- **Saving** — named zines live in the browser's local storage, and the zine you
+  have open is auto-saved as a draft and restored on reload. **Export file** writes
+  a self-contained `.json` (photos included) you can keep or move to another machine.
+
+Content that overflows a page flows onto the next one; a photo too tall for a
+page is scaled down to fit.
 
 ### Running locally
 
@@ -69,9 +93,9 @@ drains slower than BLE can push, and flooding it silently corrupts the stream.
 | File | Role |
 |---|---|
 | `index.html` | UI |
-| `app.js` | UI glue, live preview, webcam capture |
+| `app.js` | UI glue, live preview, webcam capture, zine photos + saving |
 | `printer.js` | Web Bluetooth driver + ESC/POS protocol |
-| `render.js` | text/image/QR → 384px canvas → dither/threshold → 48-byte lines |
+| `render.js` | text/zine/image/QR → 384px canvas → dither/threshold → 48-byte lines |
 | `qrcodegen.js` | vendored QR encoder ([Project Nayuki](https://www.nayuki.io/page/qr-code-generator-library), MIT) |
 
 ## Troubleshooting
@@ -81,6 +105,7 @@ drains slower than BLE can push, and flooding it silently corrupts the stream.
   raise error correction to **H**.
 - **Muddy photos** → darkness ~50% with contrast up; faces dither better under-burned.
 - **Last line stuck behind the tear bar** → raise **Feed after print**.
+- **Zine won't save** → local storage is ~5 MB; drop a photo or **Export file** instead.
 - **Connects but nothing prints** → hit **Inspect BLE**, or use `chrome://bluetooth-internals`
   for a full raw GATT dump, and check the UUIDs against the table above.
 - **Print stalls partway** → the bridge is being flooded; raise the `delay` in

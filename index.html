@@ -29,6 +29,18 @@
     .preview canvas { image-rendering: pixelated; background: #fff; max-width: 100%; }
     pre#log { background: #0b0b0b; color: #b9f5c9; padding: .75rem; border-radius: 8px; font-size: .78rem; max-height: 200px; overflow: auto; white-space: pre-wrap; }
     .note { font-size: .8rem; opacity: .7; }
+    #cam.square { aspect-ratio: 1 / 1; object-fit: cover; width: min(100%, 360px); }
+    .section { font-weight: 600; font-size: .85rem; margin: 1.2rem 0 .4rem; padding-top: .6rem; border-top: 1px solid var(--bd); }
+    select, input[type=number], input[type=text] { font: inherit; padding: .4rem; border-radius: 8px; border: 1px solid var(--bd); background: #8881; width: 100%; }
+    .tray { display: grid; gap: .5rem; margin: .5rem 0; }
+    .photo { display: grid; grid-template-columns: 56px 1fr auto; gap: .6rem; align-items: center; border: 1px solid var(--bd); border-radius: 8px; padding: .4rem; }
+    .photo img { width: 56px; height: 56px; object-fit: cover; border-radius: 4px; background: #fff; }
+    .photo button { padding: .3rem .6rem; font-size: .8rem; }
+    .photo .btns { display: grid; gap: .3rem; }
+    .photo label { margin: .2rem 0 0; }
+    .photo .row { display: flex; gap: .5rem; align-items: center; }
+    .photo .row input[type=range] { flex: 1; }
+    .photo .row select { width: auto; }
   </style>
 </head>
 <body>
@@ -44,6 +56,7 @@
 
   <div class="tabs">
     <button data-tab="text" class="active">Text</button>
+    <button data-tab="zine">Zine</button>
     <button data-tab="image">Image</button>
     <button data-tab="qr">QR code</button>
     <button data-tab="photobooth">Photobooth</button>
@@ -55,11 +68,72 @@ No phone. No WalkPrint. Just Bluetooth.</textarea>
     <div class="grid">
       <div><label>Font size <span id="fsVal">28</span>px</label><input type="range" id="fontSize" min="14" max="64" value="28"></div>
       <div><label>Align</label>
-        <select id="align" style="width:100%;padding:.4rem;border-radius:8px;">
+        <select id="align">
           <option value="left">Left</option><option value="center">Center</option><option value="right">Right</option>
         </select>
       </div>
     </div>
+  </div>
+
+  <div class="pane" id="pane-zine">
+    <textarea id="zineText" placeholder="Write your zine…" style="min-height:180px;">MY LITTLE ZINE
+issue #1
+
+a tiny thing made of
+paper and heat
+---
+A line of three dashes
+starts a new page.
+
+Put [img:1] on its own
+line to place a photo.</textarea>
+    <div class="grid">
+      <div><label>Font size <span id="zineFsVal">22</span>px</label><input type="range" id="zineFont" min="14" max="48" value="22"></div>
+      <div><label>Align</label>
+        <select id="zineAlign">
+          <option value="left">Left</option><option value="center">Center</option><option value="right">Right</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="section">Pages</div>
+    <div class="grid">
+      <div><label>Page size (paper is 48&nbsp;mm wide)</label>
+        <select id="pageSize">
+          <option value="continuous">Continuous — no pages</option>
+          <option value="48">48 × 48 mm — square</option>
+          <option value="64" selected>48 × 64 mm</option>
+          <option value="80">48 × 80 mm</option>
+          <option value="105">48 × 105 mm — tall</option>
+          <option value="custom">Custom…</option>
+        </select>
+      </div>
+      <div id="pageMMWrap" hidden><label>Page height (mm)</label>
+        <input type="number" id="pageMM" min="20" max="400" step="1" value="80">
+      </div>
+      <div>
+        <label><input type="checkbox" id="pageNums" checked> Page numbers</label>
+        <label><input type="checkbox" id="pageLine" checked> Cut line between pages</label>
+      </div>
+    </div>
+
+    <div class="section">Photos</div>
+    <input type="file" id="zinePhotos" accept="image/*" multiple>
+    <div id="photoTray" class="tray"></div>
+    <div class="note">Place a photo by putting <code>[img:1]</code> on its own line — <b>Insert</b> drops the token at your cursor. A line of <code>---</code> starts a new page.</div>
+
+    <div class="section">Saved zines</div>
+    <div class="bar" style="margin-top:.25rem;">
+      <input type="text" id="zineName" placeholder="zine name" style="width:11rem;">
+      <button id="zineSave">Save</button>
+      <select id="zineList" style="width:auto;min-width:9rem;"></select>
+      <button id="zineLoad">Load</button>
+      <button id="zineDelete">Delete</button>
+      <button id="zineExport">Export file</button>
+      <button id="zineImportBtn">Import file</button>
+      <input type="file" id="zineImport" accept="application/json,.json" hidden>
+    </div>
+    <div class="note" id="zineInfo"></div>
   </div>
 
   <div class="pane" id="pane-image">
@@ -96,10 +170,17 @@ No phone. No WalkPrint. Just Bluetooth.</textarea>
     </div>
     <div class="bar" style="margin-top:.5rem;">
       <button id="camStart">Start camera</button>
+      <button id="camSwitch" disabled>🔄 Flip camera</button>
       <button id="camShot" disabled>📸 Capture</button>
       <button id="camRetake" disabled>Retake</button>
     </div>
     <div class="grid">
+      <div><label>Crop</label>
+        <select id="camCrop" style="width:100%;padding:.4rem;border-radius:8px;">
+          <option value="full">Full frame</option>
+          <option value="square" selected>Square (1:1)</option>
+        </select>
+      </div>
       <div><label><input type="checkbox" id="camMirror" checked> Mirror (selfie)</label></div>
       <div><label>Contrast <span id="pbCoVal">1.30</span></label><input type="range" id="pbContrast" min="0.5" max="2" step="0.05" value="1.3"></div>
     </div>

@@ -55,38 +55,148 @@ export function renderQR(text, { ecc = 'M', caption = false } = {}) {
   return canvas;
 }
 
-// Render multiline text onto a canvas sized to the print width.
-export function renderText(text, { fontSize = 28, font = 'monospace', align = 'left', pad = 8 } = {}) {
+// --- zine layout ------------------------------------------------------------
+const DOTS_PER_MM = 8;    // 203 dpi head
+const PAGE_NUM_H = 22;    // band reserved at the foot of a page for its number
+const SEP_H = 16;         // gutter between pages that holds the cut line
+const IMG_GAP = 8;        // breathing room above/below a placed photo
+
+export { DOTS_PER_MM };
+
+// Word-wrap one paragraph to the print width.
+function wrapLine(measure, raw, maxW) {
+  if (raw === '') return [''];
+  const out = [];
+  let line = '';
+  for (const word of raw.split(' ')) {
+    const test = line ? `${line} ${word}` : word;
+    if (measure.measureText(test).width > maxW && line) { out.push(line); line = word; }
+    else line = test;
+  }
+  out.push(line);
+  return out;
+}
+
+// Dither a photo to pure black/white at its final size, so it survives the
+// page-wide threshold pass that keeps the text crisp.
+function renderPhoto(img, w, h, contrast) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  dither(c, { contrast, mode: 'dither' });
+  return c;
+}
+
+function drawCutLine(ctx, y) {
+  ctx.fillStyle = '#000';
+  for (let x = 8; x < PRINT_WIDTH - 8; x += 12) ctx.fillRect(x, y, 6, 2);
+}
+
+// Lay text and placed photos out as a zine: a stack of fixed-height pages, with
+// optional page numbers and a dashed cut line in the gutter between them.
+// pageHeight 0 means continuous — one page as tall as the content, i.e. the
+// plain text behaviour. Photos come from a Map of id -> { img, width, align };
+// a line reading `[img:3]` places one, a line of `---` forces a page break.
+// Returns a canvas carrying .zinePages / .zineTruncated.
+export function renderZine(text, {
+  fontSize = 28, font = 'monospace', align = 'left', pad = 8,
+  pageHeight = 0, pageNumbers = false, separator = false,
+  photos = new Map(), photoContrast = 1.15, maxHeight = 30000,
+} = {}) {
   const measure = document.createElement('canvas').getContext('2d');
   measure.font = `${fontSize}px ${font}`;
   const lineHeight = Math.round(fontSize * 1.3);
-
-  // Word-wrap to the print width.
   const maxW = PRINT_WIDTH - pad * 2;
-  const wrapped = [];
+
+  // 1. Flatten the source into a list of laid-out items.
+  const items = [];
   for (const raw of text.split('\n')) {
-    if (raw === '') { wrapped.push(''); continue; }
-    let line = '';
-    for (const word of raw.split(' ')) {
-      const test = line ? `${line} ${word}` : word;
-      if (measure.measureText(test).width > maxW && line) { wrapped.push(line); line = word; }
-      else line = test;
+    const trimmed = raw.trim();
+    if (/^(-{3,}|={3,})$/.test(trimmed)) { items.push({ type: 'break' }); continue; }
+    const token = trimmed.match(/^\[img:(\d+)\]$/i);
+    const ph = token && photos.get(+token[1]);
+    if (ph && ph.img && ph.img.naturalWidth) {
+      const w = Math.max(16, Math.round(maxW * (ph.width ?? 100) / 100));
+      const h = Math.max(1, Math.round(ph.img.naturalHeight * w / ph.img.naturalWidth));
+      items.push({ type: 'img', ph, w, h });
+      continue;                       // an unknown token just prints as text
     }
-    wrapped.push(line);
+    for (const line of wrapLine(measure, raw, maxW)) items.push({ type: 'text', text: line });
   }
+  const itemH = (it) => (it.type === 'img' ? it.h + IMG_GAP : lineHeight);
+
+  // 2. Break the flow into pages.
+  let pages, pageH = pageHeight;
+  if (pageHeight) {
+    const contentH = Math.max(lineHeight, pageHeight - pad * 2 - (pageNumbers ? PAGE_NUM_H : 0));
+    for (const it of items) {         // shrink a photo that could never fit a page
+      if (it.type !== 'img' || it.h + IMG_GAP <= contentH) continue;
+      const s = (contentH - IMG_GAP) / it.h;
+      it.w = Math.max(8, Math.round(it.w * s));
+      it.h = Math.max(1, Math.round(it.h * s));
+    }
+    pages = [[]];
+    let y = 0;
+    for (const it of items) {
+      let page = pages[pages.length - 1];
+      if (it.type === 'break') { if (page.length) { pages.push([]); y = 0; } continue; }
+      if (!page.length && it.type === 'text' && it.text === '') continue;  // no blank first line
+      if (y + itemH(it) > contentH && page.length) { pages.push([]); page = pages[pages.length - 1]; y = 0; }
+      it.y = y;
+      y += itemH(it);
+      page.push(it);
+    }
+    if (pages.length > 1 && !pages[pages.length - 1].length) pages.pop();
+  } else {
+    let y = 0;
+    const flow = items.filter((it) => it.type !== 'break');
+    for (const it of flow) { it.y = y; y += itemH(it); }
+    pages = [flow];
+    pageH = Math.max(lineHeight, y + pad * 2);
+  }
+
+  // 3. Draw. Keep the canvas inside the browser's limits.
+  const sep = separator && pageHeight ? SEP_H : 0;
+  let truncated = false;
+  if (pageHeight) {
+    const maxPages = Math.max(1, Math.floor((maxHeight + sep) / (pageH + sep)));
+    if (pages.length > maxPages) { pages = pages.slice(0, maxPages); truncated = true; }
+  }
+  const n = pages.length;
 
   const canvas = document.createElement('canvas');
   canvas.width = PRINT_WIDTH;
-  canvas.height = Math.max(lineHeight, wrapped.length * lineHeight + pad * 2);
+  canvas.height = n * pageH + (n - 1) * sep;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#000';
-  ctx.font = `${fontSize}px ${font}`;
   ctx.textBaseline = 'top';
-  ctx.textAlign = align;
-  const x = align === 'center' ? PRINT_WIDTH / 2 : align === 'right' ? PRINT_WIDTH - pad : pad;
-  wrapped.forEach((l, i) => ctx.fillText(l, x, pad + i * lineHeight));
+
+  const textX = align === 'center' ? PRINT_WIDTH / 2 : align === 'right' ? PRINT_WIDTH - pad : pad;
+  pages.forEach((page, p) => {
+    const top = p * (pageH + sep);
+    ctx.fillStyle = '#000';
+    ctx.font = `${fontSize}px ${font}`;
+    ctx.textAlign = align;
+    for (const it of page) {
+      if (it.type === 'text') { ctx.fillText(it.text, textX, top + pad + it.y); continue; }
+      const x = it.ph.align === 'center' ? Math.round((PRINT_WIDTH - it.w) / 2)
+        : it.ph.align === 'right' ? PRINT_WIDTH - pad - it.w : pad;
+      ctx.drawImage(renderPhoto(it.ph.img, it.w, it.h, photoContrast), x, top + pad + it.y + IMG_GAP / 2);
+    }
+    if (pageNumbers && pageHeight) {
+      ctx.font = `16px ${font}`;
+      ctx.textAlign = 'center';
+      ctx.fillText(String(p + 1), PRINT_WIDTH / 2, top + pageH - PAGE_NUM_H + 4);
+    }
+    if (sep && p < n - 1) drawCutLine(ctx, top + pageH + Math.floor(sep / 2));
+  });
+
+  canvas.zinePages = n;
+  canvas.zineTruncated = truncated;
   return canvas;
 }
 
