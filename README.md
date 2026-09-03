@@ -135,6 +135,13 @@ Printing is guarded accordingly:
   zine has been pushed out.
 - **Silence means unknown.** A printer that doesn't answer is probed once at
   connect and then printed to blind — an unanswered query never blocks a job.
+- **Slow replies are learned, not misread.** This bridge can take seconds to
+  start answering after connecting. A reply that lands after its window closed is
+  discarded, never handed to the next query — `0x16` (printer status) read as an
+  offline byte would mean "cover open", and the app would refuse to print on a
+  healthy machine. After any timeout the driver waits for the line to go quiet
+  before asking again, sizes later windows from the slowest reply it has actually
+  seen, and reopens a "no status support" verdict if a late reply turns up.
 - **One job at a time** — completion is confirmed by the sentinel above, with an
   800 ms settle so the platen has stopped before the button comes back.
 
